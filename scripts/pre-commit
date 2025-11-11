@@ -1,0 +1,14 @@
+#!/bin/bash
+if command -v black &> /dev/null; then
+    black --check . || echo "black: formato incorrecto"
+fi
+if command -v gitleaks &> /dev/null; then
+    gitleaks detect --source . --verbose || echo "gitleaks: posibles secretos"
+else
+    echo "gitleaks no encontrado"
+fi
+large_files=$(find . -type f -size +10M)
+if [ -n "$large_files" ]; then
+    echo "Archivos >10MB: $large_files"
+fi
+exit 0
