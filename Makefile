@@ -1,4 +1,4 @@
-.PHONY: install-deps install-hooks setup
+.PHONY: install-deps install-hooks setup test
 
 install-deps:
 	@echo "Instalando black (Python formatter)..."
@@ -21,3 +21,6 @@ install-hooks:
 
 setup: install-deps install-hooks
 	@echo "Setup completo. ya puede usar git commit"
+
+test:
+	pytest
