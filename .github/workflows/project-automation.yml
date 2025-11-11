@@ -1,0 +1,152 @@
+name: Project Automation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed, labeled]
+  issues:
+    types: [labeled, unlabeled]
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+
+jobs:
+  project-automation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mover tarjeta por eventos de PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const action = context.payload.action;
+            const pr = context.payload.pull_request;
+            let targetColumn = null;
+
+            if (['opened', 'synchronize', 'reopened'].includes(action)) {
+              targetColumn = 'In Progress';
+            }
+
+            if (action === 'labeled' && context.payload.label.name === 'ready-for-review') {
+              targetColumn = 'Review/QA';
+            }
+
+            if (action === 'closed' && pr.merged) {
+              targetColumn = 'Done';
+            }
+
+            if (targetColumn) {
+              const projectId = 1; // CAMBIA A TU PROJECT ID
+              const card = await github.graphql(`
+                query($owner: String!, $repo: String!, $pr: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                      projectCards {
+                        nodes {
+                          id
+                          column {
+                            name
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pr: pr.number
+              });
+
+              const cardId = card.repository.pullRequest.projectCards.nodes[0]?.id;
+              if (!cardId) return;
+
+              await github.graphql(`
+                mutation($cardId: ID!, $columnName: String!) {
+                  moveProjectCard(input: {cardId: $cardId, columnName: $columnName}) {
+                    clientMutationId
+                  }
+                }
+              `, { cardId, columnName: targetColumn });
+            }
+
+      - name: Actualizar Estimate por label size
+        if: github.event_name == 'issues' && github.event.action == 'labeled' && startsWith(github.event.label.name, 'size:')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const label = context.payload.label.name;
+            const sizeMap = { 'size:S': 1, 'size:M': 3, 'size:L': 5 };
+            const value = sizeMap[label];
+            if (!value) return;
+
+            const projectId = 1; // CAMBIA A TU PROJECT ID
+            const fieldId = 'Estimate'; // CAMBIA SI ES DIFERENTE
+
+            await github.graphql(`
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: String!, $value: Int!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId
+                  itemId: $itemId
+                  fieldId: $fieldId
+                  value: { number: $value }
+                }) {
+                  clientMutationId
+                }
+              }
+            `, {
+              projectId,
+              itemId: context.payload.issue.node_id,
+              fieldId,
+              value
+            });
+
+      - name: Registrar Blocked time
+        if: github.event_name == 'issues' && (github.event.action == 'labeled' || github.event.action == 'unlabeled')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const action = context.payload.action;
+            const label = context.payload.label?.name;
+            if (!label || !['status:blocked', 'status:non-blocked'].includes(label)) return;
+
+            const now = new Date().toISOString().split('T')[0];
+            const projectId = 1; // CAMBIA A TU PROJECT ID
+            const fieldId = 'Blocked time';
+
+            let current = '';
+            try {
+              const field = await github.graphql(`
+                query($projectId: ID!, $itemId: ID!, $fieldId: String!) {
+                  node(id: $itemId) {
+                    ... on ProjectV2Item {
+                      fieldValueByName(name: $fieldId) {
+                        ... on ProjectV2ItemFieldTextValue { text }
+                      }
+                    }
+                  }
+                }
+              `, { projectId, itemId: context.payload.issue.node_id, fieldId });
+              current = field.node.fieldValueByName?.text || '';
+            } catch (e) {}
+
+            let newValue = current;
+            if (label === 'status:blocked') {
+              newValue = current ? `${current}, ${now} (start)` : `${now} (start)`;
+            } else {
+              newValue = current ? `${current}, ${now} (end)` : `${now} (end)`;
+            }
+
+            await github.graphql(`
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: String!, $value: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId
+                  itemId: $itemId
+                  fieldId: $fieldId
+                  value: { text: $value }
+                }) {
+                  clientMutationId
+                }
+              }
+            `, { projectId, itemId: context.payload.issue.node_id, fieldId, value: newValue });
