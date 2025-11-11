@@ -23,4 +23,13 @@ setup: install-deps install-hooks
 	@echo "Setup completo. ya puede usar git commit"
 
 test:
+	@echo "Ejecutando tests..."
 	pytest
+
+format:
+	@echo "Formateando código python con black..."
+	@black tests
+
+format-check:
+	@echo "Verificando formato (sin modificar archivos)..."
+	@black --check tests --diff

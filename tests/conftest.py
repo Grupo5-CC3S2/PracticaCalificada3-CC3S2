@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 import shutil
 
+
 # Fixture para repositorio temporal
 @pytest.fixture
 def temp_repo(tmp_path, monkeypatch):
@@ -22,7 +23,7 @@ def temp_repo(tmp_path, monkeypatch):
         subprocess.run(["git", "init"], check=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], check=True)
         subprocess.run(["git", "config", "user.name", "Test User"], check=True)
-        
+
         # Instalar el hook pre-commit en .git/hooks/pre-commit del repositorio temporal
         # para que git lo ejecute automáticamente durante 'git commit'
         hooks_dir = git_dir / "hooks"
@@ -33,7 +34,7 @@ def temp_repo(tmp_path, monkeypatch):
             dest_hook = hooks_dir / "pre-commit"
             shutil.copy2(src_hook, dest_hook)
             os.chmod(dest_hook, 0o755)
-        
+
         # Instalar el hook commit-msg en .git/hooks/commit-msg del repositorio temporal
         src_commit_msg = project_root / "scripts" / "commit-msg"
         if src_commit_msg.exists():
