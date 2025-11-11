@@ -28,14 +28,14 @@ def temp_repo(tmp_path, monkeypatch):
         hooks_dir = git_dir / "hooks"
         hooks_dir.mkdir(exist_ok=True)
         project_root = Path(__file__).resolve().parents[1]
-        src_hook = project_root / "src" / "pre-commit"
+        src_hook = project_root / "scripts" / "pre-commit"
         if src_hook.exists():
             dest_hook = hooks_dir / "pre-commit"
             shutil.copy2(src_hook, dest_hook)
             os.chmod(dest_hook, 0o755)
         
         # Instalar el hook commit-msg en .git/hooks/commit-msg del repositorio temporal
-        src_commit_msg = project_root / "src" / "commit-msg"
+        src_commit_msg = project_root / "scripts" / "commit-msg"
         if src_commit_msg.exists():
             dest_commit_msg = hooks_dir / "commit-msg"
             shutil.copy2(src_commit_msg, dest_commit_msg)
