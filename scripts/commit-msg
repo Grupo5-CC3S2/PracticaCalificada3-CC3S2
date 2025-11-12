@@ -9,5 +9,6 @@ if [[ ! $MSG =~ $REGEX ]]; then
     echo "Ej: feat(setup): add hooks"
     exit 1
 else
+    echo "Mensaje de commit correcto. Procediendo con el commit..."
     exit 0
 fi
