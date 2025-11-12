@@ -15,7 +15,7 @@ jobs:
   project-automation:
     runs-on: ubuntu-latest
     steps:
-      - name: Mover tarjeta por eventos de PR
+      - name: Mover issues vinculados por eventos de PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
@@ -24,21 +24,58 @@ jobs:
             const action = context.payload.action;
             const pr = context.payload.pull_request;
             let targetStatus = null;
-
+            
             if (['opened', 'synchronize', 'reopened'].includes(action)) {
-              targetStatus = 'In progress';
+              targetStatus = 'In Progress';
             } else if (action === 'labeled' && context.payload.label?.name === 'ready-for-review') {
               targetStatus = 'Review/QA';
             } else if (action === 'closed' && pr.merged) {
               targetStatus = 'Done';
             }
-
+            
             if (!targetStatus) return;
-
+            
             const PROJECT_NUMBER = 2;
             const org = context.repo.owner;
-
+            const repo = context.repo.repo;
+            
             try {
+              // Extraer números de issues del cuerpo del PR y commits
+              const issueNumbers = new Set();
+              
+              // Buscar en el título y cuerpo del PR
+              const prText = `${pr.title} ${pr.body || ''}`;
+              const prMatches = prText.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
+              for (const match of prMatches) {
+                const num = parseInt(match[1] || match[2]);
+                if (num) issueNumbers.add(num);
+              }
+              
+              // Obtener commits del PR
+              const commits = await github.rest.pulls.listCommits({
+                owner: org,
+                repo: repo,
+                pull_number: pr.number
+              });
+              
+              // Buscar en mensajes de commits
+              for (const commit of commits.data) {
+                const message = commit.commit.message;
+                const commitMatches = message.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
+                for (const match of commitMatches) {
+                  const num = parseInt(match[1] || match[2]);
+                  if (num) issueNumbers.add(num);
+                }
+              }
+              
+              if (issueNumbers.size === 0) {
+                console.log('No issues found linked to this PR');
+                return;
+              }
+              
+              console.log(`Found linked issues: ${Array.from(issueNumbers).join(', ')}`);
+              
+              // Obtener información del proyecto
               const projectQuery = `
                 query($org: String!, $projectNumber: Int!) {
                   organization(login: $org) {
@@ -57,12 +94,12 @@ jobs:
                   }
                 }
               `;
-
+              
               const projectResult = await github.graphql(projectQuery, {
                 org,
                 projectNumber: PROJECT_NUMBER
               });
-
+              
               const project = projectResult.organization.projectV2;
               const statusField = project.field;
               
@@ -71,107 +108,8 @@ jobs:
                 console.log(`Status "${targetStatus}" not found in project`);
                 return;
               }
-
-              const itemQuery = `
-                query($org: String!, $projectNumber: Int!) {
-                  organization(login: $org) {
-                    projectV2(number: $projectNumber) {
-                      items(first: 100) {
-                        nodes {
-                          id
-                          content {
-                            ... on PullRequest {
-                              number
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              `;
-
-              const itemResult = await github.graphql(itemQuery, {
-                org,
-                projectNumber: PROJECT_NUMBER
-              });
-
-              const item = itemResult.organization.projectV2.items.nodes.find(
-                node => node.content?.number === pr.number
-              );
-
-              if (!item) {
-                console.log(`PR #${pr.number} not found in project`);
-                return;
-              }
-
-              const updateMutation = `
-                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-                  updateProjectV2ItemFieldValue(input: {
-                    projectId: $projectId
-                    itemId: $itemId
-                    fieldId: $fieldId
-                    value: { singleSelectOptionId: $optionId }
-                  }) {
-                    projectV2Item {
-                      id
-                    }
-                  }
-                }
-              `;
-
-              await github.graphql(updateMutation, {
-                projectId: project.id,
-                itemId: item.id,
-                fieldId: statusField.id,
-                optionId
-              });
-
-              console.log(`PR #${pr.number} moved to "${targetStatus}"`);
-            } catch (error) {
-              console.error('Error:', error.message);
-              throw error;
-            }
-
-      - name: Actualizar Estimate por label size
-        if: github.event_name == 'issues' && github.event.action == 'labeled' && startsWith(github.event.label.name, 'size:')
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.PROJECT_TOKEN }}
-          script: |
-            const label = context.payload.label.name;
-            const sizeMap = { 'size:S': 1, 'size:M': 3, 'size:L': 5 };
-            const value = sizeMap[label];
-            if (!value) return;
-
-            const PROJECT_NUMBER = 2;
-            const org = context.repo.owner;
-            const issue = context.payload.issue;
-
-            try {
-              const projectQuery = `
-                query($org: String!, $projectNumber: Int!) {
-                  organization(login: $org) {
-                    projectV2(number: $projectNumber) {
-                      id
-                      field(name: "Estimate") {
-                        ... on ProjectV2FieldCommon {
-                          id
-                        }
-                      }
-                    }
-                  }
-                }
-              `;
-
-              const projectResult = await github.graphql(projectQuery, {
-                org,
-                projectNumber: PROJECT_NUMBER
-              });
-
-              const project = projectResult.organization.projectV2;
-              const estimateField = project.field;
-
+              
+              // Obtener items del proyecto
               const itemQuery = `
                 query($org: String!, $projectNumber: Int!) {
                   organization(login: $org) {
@@ -190,21 +128,116 @@ jobs:
                   }
                 }
               `;
-
+              
               const itemResult = await github.graphql(itemQuery, {
                 org,
                 projectNumber: PROJECT_NUMBER
               });
-
+              
+              const updateMutation = `
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { singleSelectOptionId: $optionId }
+                  }) {
+                    projectV2Item {
+                      id
+                    }
+                  }
+                }
+              `;
+              
+              // Mover cada issue vinculado
+              for (const issueNumber of issueNumbers) {
+                const item = itemResult.organization.projectV2.items.nodes.find(
+                  node => node.content?.number === issueNumber
+                );
+                
+                if (!item) {
+                  console.log(`Issue #${issueNumber} not found in project`);
+                  continue;
+                }
+                
+                await github.graphql(updateMutation, {
+                  projectId: project.id,
+                  itemId: item.id,
+                  fieldId: statusField.id,
+                  optionId
+                });
+                
+                console.log(`Issue #${issueNumber} moved to "${targetStatus}"`);
+              }
+              
+            } catch (error) {
+              console.error('Error:', error.message);
+              throw error;
+            }
+            
+      - name: Actualizar Estimate por label size
+        if: github.event_name == 'issues' && github.event.action == 'labeled' && startsWith(github.event.label.name, 'size:')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const label = context.payload.label.name;
+            const sizeMap = { 'size:S': 1, 'size:M': 3, 'size:L': 5 };
+            const value = sizeMap[label];
+            if (!value) return;
+            const PROJECT_NUMBER = 2;
+            const org = context.repo.owner;
+            const issue = context.payload.issue;
+            try {
+              const projectQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      id
+                      field(name: "Estimate") {
+                        ... on ProjectV2FieldCommon {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+              const projectResult = await github.graphql(projectQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+              const project = projectResult.organization.projectV2;
+              const estimateField = project.field;
+              const itemQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      items(first: 100) {
+                        nodes {
+                          id
+                          content {
+                            ... on Issue {
+                              number
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+              const itemResult = await github.graphql(itemQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
               const item = itemResult.organization.projectV2.items.nodes.find(
                 node => node.content?.number === issue.number
               );
-
               if (!item) {
                 console.log(`Issue #${issue.number} not found in project`);
                 return;
               }
-
               const updateMutation = `
                 mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: Float!) {
                   updateProjectV2ItemFieldValue(input: {
@@ -219,20 +252,17 @@ jobs:
                   }
                 }
               `;
-
               await github.graphql(updateMutation, {
                 projectId: project.id,
                 itemId: item.id,
                 fieldId: estimateField.id,
                 value
               });
-
               console.log(`Issue #${issue.number} Estimate updated to ${value}`);
             } catch (error) {
               console.error('Error:', error.message);
               throw error;
             }
-
       - name: Registrar Blocked time
         if: github.event_name == 'issues' && (github.event.action == 'labeled' || github.event.action == 'unlabeled')
         uses: actions/github-script@v7
@@ -241,12 +271,10 @@ jobs:
           script: |
             const label = context.payload.label?.name;
             if (!label || !['status:blocked', 'status:non-blocked'].includes(label)) return;
-
             const now = new Date().toISOString().split('T')[0];
             const PROJECT_NUMBER = 2;
             const org = context.repo.owner;
             const issue = context.payload.issue;
-
             try {
               const projectQuery = `
                 query($org: String!, $projectNumber: Int!) {
@@ -262,15 +290,12 @@ jobs:
                   }
                 }
               `;
-
               const projectResult = await github.graphql(projectQuery, {
                 org,
                 projectNumber: PROJECT_NUMBER
               });
-
               const project = projectResult.organization.projectV2;
               const blockedField = project.field;
-
               const itemQuery = `
                 query($org: String!, $projectNumber: Int!) {
                   organization(login: $org) {
@@ -294,25 +319,20 @@ jobs:
                   }
                 }
               `;
-
               const itemResult = await github.graphql(itemQuery, {
                 org,
                 projectNumber: PROJECT_NUMBER
               });
-
               const item = itemResult.organization.projectV2.items.nodes.find(
                 node => node.content?.number === issue.number
               );
-
               if (!item) {
                 console.log(`Issue #${issue.number} not found in project`);
                 return;
               }
-
               let current = item.fieldValueByName?.text || '';
               const suffix = label === 'status:blocked' ? ' - START' : ' - END';
               const newValue = current ? `${current}\n${now}${suffix}` : `${now}${suffix}`;
-
               const updateMutation = `
                 mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
                   updateProjectV2ItemFieldValue(input: {
@@ -327,14 +347,12 @@ jobs:
                   }
                 }
               `;
-
               await github.graphql(updateMutation, {
                 projectId: project.id,
                 itemId: item.id,
                 fieldId: blockedField.id,
                 value: newValue
               });
-
               console.log(`Issue #${issue.number} Blocked time updated`);
             } catch (error) {
               console.error('Error:', error.message);
