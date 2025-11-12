@@ -19,6 +19,7 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const action = context.payload.action;
             const pr = context.payload.pull_request;
@@ -34,19 +35,20 @@ jobs:
 
             if (!targetStatus) return;
 
-            const projectId = 2; // TU PROJECT ID
+            const PROJECT_NUMBER = 2;
             const org = context.repo.owner;
 
-            // Obtener el item del PR en el proyecto
-            const query = `
-              query($org: String!, $pr: Int!) {
-                organization(login: $org) {
-                  projectV2(number: $projectId) {
-                    items(first: 100, filterBy: {content: {type: PULL_REQUEST, number: $pr}}) {
-                      nodes {
-                        id
-                        fieldValueByName(name: "Status") {
-                          ... on ProjectV2ItemFieldSingleSelectValue {
+            try {
+              const projectQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      id
+                      field(name: "Status") {
+                        ... on ProjectV2SingleSelectField {
+                          id
+                          options {
+                            id
                             name
                           }
                         }
@@ -54,193 +56,287 @@ jobs:
                     }
                   }
                 }
+              `;
+
+              const projectResult = await github.graphql(projectQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const project = projectResult.organization.projectV2;
+              const statusField = project.field;
+              
+              const optionId = statusField.options.find(o => o.name === targetStatus)?.id;
+              if (!optionId) {
+                console.log(`Status "${targetStatus}" not found in project`);
+                return;
               }
-            `;
 
-            const variables = { org, pr: pr.number };
-            const result = await github.graphql(query, variables);
-            const item = result.organization.projectV2.items.nodes[0];
-            if (!item) return;
-
-            // Obtener opción de estado
-            const statusField = await github.graphql(`
-              query($org: String!) {
-                organization(login: $org) {
-                  projectV2(number: $projectId) {
-                    field(name: "Status") {
-                      ... on ProjectV2SingleSelectField {
-                        options {
+              const itemQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      items(first: 100) {
+                        nodes {
                           id
-                          name
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            `, { org });
-
-            const optionId = statusField.organization.projectV2.field.options.find(o => o.name === targetStatus)?.id;
-            if (!optionId) return;
-
-            // Actualizar estado
-            await github.graphql(`
-              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-                updateProjectV2ItemFieldValue(input: {
-                  projectId: $projectId
-                  itemId: $itemId
-                  fieldId: $fieldId
-                  value: { singleSelectOptionId: $optionId }
-                }) {
-                  clientMutationId
-                }
-              }
-            `, {
-              projectId: `PVT_${projectId}`,
-              itemId: item.id,
-              fieldId: statusField.organization.projectV2.field.id,
-              optionId
-            });
-
-      - name: Actualizar Estimate por label size
-        if: github.event_name == 'issues' && github.event.action == 'labeled' && startsWith(github.event.label.name, 'size:')
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const label = context.payload.label.name;
-            const sizeMap = { 'size:S': 1, 'size:M': 3, 'size:L': 5 };
-            const value = sizeMap[label];
-            if (!value) return;
-
-            const projectId = 2;
-            const org = context.repo.owner;
-            const issueId = context.payload.issue.node_id;
-
-            // Obtener campo Estimate
-            const fieldQuery = await github.graphql(`
-              query($org: String!) {
-                organization(login: $org) {
-                  projectV2(number: $projectId) {
-                    field(name: "Estimate") {
-                      ... on ProjectV2ItemFieldNumberValue {
-                        id
-                      }
-                    }
-                  }
-                }
-              }
-            `, { org });
-
-            const fieldId = fieldQuery.organization.projectV2.field.id;
-
-            // Obtener item del issue
-            const itemQuery = await github.graphql(`
-              query($org: String!, $issueId: ID!) {
-                node(id: $issueId) {
-                  ... on Issue {
-                    projectItems(first: 10) {
-                      nodes {
-                        id
-                      }
-                    }
-                  }
-                }
-              }
-            `, { issueId });
-
-            const itemId = itemQuery.node.projectItems.nodes[0]?.id;
-            if (!itemId) return;
-
-            // Actualizar
-            await github.graphql(`
-              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: Float!) {
-                updateProjectV2ItemFieldValue(input: {
-                  projectId: $projectId
-                  itemId: $itemId
-                  fieldId: $fieldId
-                  value: { number: $value }
-                }) {
-                  clientMutationId
-                }
-              }
-            `, {
-              projectId: `PVT_${projectId}`,
-              itemId,
-              fieldId,
-              value
-            });
-
-      - name: Registrar Blocked time
-        if: github.event_name == 'issues' && (github.event.action == 'labeled' || github.event.action == 'unlabeled')
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const label = context.payload.label?.name;
-            if (!label || !['status:blocked', 'status:non-blocked'].includes(label)) return;
-
-            const now = new Date().toISOString().split('T')[0];
-            const projectId = 2;
-            const org = context.repo.owner;
-            const issueId = context.payload.issue.node_id;
-
-            // Obtener campo Blocked time
-            const fieldQuery = await github.graphql(`
-              query($org: String!) {
-                organization(login: $org) {
-                  projectV2(number: $projectId) {
-                    field(name: "Blocked time") {
-                      ... on ProjectV2ItemFieldTextValue {
-                        id
-                      }
-                    }
-                  }
-                }
-              }
-            `, { org });
-
-            const fieldId = fieldQuery.organization.projectV2.field.id;
-
-            // Obtener item
-            const itemQuery = await github.graphql(`
-              query($issueId: ID!) {
-                node(id: $issueId) {
-                  ... on Issue {
-                    projectItems(first: 10) {
-                      nodes {
-                        id
-                        fieldValueByName(name: "Blocked time") {
-                          ... on ProjectV2ItemFieldTextValue {
-                            text
+                          content {
+                            ... on PullRequest {
+                              number
+                            }
                           }
                         }
                       }
                     }
                   }
                 }
+              `;
+
+              const itemResult = await github.graphql(itemQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const item = itemResult.organization.projectV2.items.nodes.find(
+                node => node.content?.number === pr.number
+              );
+
+              if (!item) {
+                console.log(`PR #${pr.number} not found in project`);
+                return;
               }
-            `, { issueId });
 
-            const item = itemQuery.node.projectItems.nodes[0];
-            if (!item) return;
-
-            let current = item.fieldValueByName?.text || '';
-            const suffix = label === 'status:blocked' ? ' - START' : ' - END';
-            const newValue = current ? `${current}\n${now}${suffix}` : `${now}${suffix}`;
-
-            await github.graphql(`
-              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
-                updateProjectV2ItemFieldValue(input: {
-                  projectId: $projectId
-                  itemId: $itemId
-                  fieldId: $fieldId
-                  value: { text: $value }
-                }) {
-                  clientMutationId
+              const updateMutation = `
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { singleSelectOptionId: $optionId }
+                  }) {
+                    projectV2Item {
+                      id
+                    }
+                  }
                 }
+              `;
+
+              await github.graphql(updateMutation, {
+                projectId: project.id,
+                itemId: item.id,
+                fieldId: statusField.id,
+                optionId
+              });
+
+              console.log(`PR #${pr.number} moved to "${targetStatus}"`);
+            } catch (error) {
+              console.error('Error:', error.message);
+              throw error;
+            }
+
+      - name: Actualizar Estimate por label size
+        if: github.event_name == 'issues' && github.event.action == 'labeled' && startsWith(github.event.label.name, 'size:')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const label = context.payload.label.name;
+            const sizeMap = { 'size:S': 1, 'size:M': 3, 'size:L': 5 };
+            const value = sizeMap[label];
+            if (!value) return;
+
+            const PROJECT_NUMBER = 2;
+            const org = context.repo.owner;
+            const issue = context.payload.issue;
+
+            try {
+              const projectQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      id
+                      field(name: "Estimate") {
+                        ... on ProjectV2FieldCommon {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+
+              const projectResult = await github.graphql(projectQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const project = projectResult.organization.projectV2;
+              const estimateField = project.field;
+
+              const itemQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      items(first: 100) {
+                        nodes {
+                          id
+                          content {
+                            ... on Issue {
+                              number
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+
+              const itemResult = await github.graphql(itemQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const item = itemResult.organization.projectV2.items.nodes.find(
+                node => node.content?.number === issue.number
+              );
+
+              if (!item) {
+                console.log(`Issue #${issue.number} not found in project`);
+                return;
               }
-            `, {
-              projectId: `PVT_${projectId}`,
-              itemId: item.id,
-              fieldId,
-              value: newValue
-            };
+
+              const updateMutation = `
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: Float!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { number: $value }
+                  }) {
+                    projectV2Item {
+                      id
+                    }
+                  }
+                }
+              `;
+
+              await github.graphql(updateMutation, {
+                projectId: project.id,
+                itemId: item.id,
+                fieldId: estimateField.id,
+                value
+              });
+
+              console.log(`Issue #${issue.number} Estimate updated to ${value}`);
+            } catch (error) {
+              console.error('Error:', error.message);
+              throw error;
+            }
+
+      - name: Registrar Blocked time
+        if: github.event_name == 'issues' && (github.event.action == 'labeled' || github.event.action == 'unlabeled')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const label = context.payload.label?.name;
+            if (!label || !['status:blocked', 'status:non-blocked'].includes(label)) return;
+
+            const now = new Date().toISOString().split('T')[0];
+            const PROJECT_NUMBER = 2;
+            const org = context.repo.owner;
+            const issue = context.payload.issue;
+
+            try {
+              const projectQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      id
+                      field(name: "Blocked time") {
+                        ... on ProjectV2FieldCommon {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+
+              const projectResult = await github.graphql(projectQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const project = projectResult.organization.projectV2;
+              const blockedField = project.field;
+
+              const itemQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      items(first: 100) {
+                        nodes {
+                          id
+                          content {
+                            ... on Issue {
+                              number
+                            }
+                          }
+                          fieldValueByName(name: "Blocked time") {
+                            ... on ProjectV2ItemFieldTextValue {
+                              text
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+
+              const itemResult = await github.graphql(itemQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const item = itemResult.organization.projectV2.items.nodes.find(
+                node => node.content?.number === issue.number
+              );
+
+              if (!item) {
+                console.log(`Issue #${issue.number} not found in project`);
+                return;
+              }
+
+              let current = item.fieldValueByName?.text || '';
+              const suffix = label === 'status:blocked' ? ' - START' : ' - END';
+              const newValue = current ? `${current}\n${now}${suffix}` : `${now}${suffix}`;
+
+              const updateMutation = `
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { text: $value }
+                  }) {
+                    projectV2Item {
+                      id
+                    }
+                  }
+                }
+              `;
+
+              await github.graphql(updateMutation, {
+                projectId: project.id,
+                itemId: item.id,
+                fieldId: blockedField.id,
+                value: newValue
+              });
+
+              console.log(`Issue #${issue.number} Blocked time updated`);
+            } catch (error) {
+              console.error('Error:', error.message);
+              throw error;
+            }
