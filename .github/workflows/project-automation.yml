@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, closed]
   issues:
-    types: [labeled, unlabeled]
+    types: [opened, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -15,6 +15,57 @@ jobs:
   project-automation:
     runs-on: ubuntu-latest
     steps:
+      - name: Auto-agregar issue al proyecto
+        if: github.event_name == 'issues' && github.event.action == 'opened'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const PROJECT_NUMBER = 2;
+            const org = context.repo.owner;
+            const issue = context.payload.issue;
+
+            try {
+              const projectQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      id
+                    }
+                  }
+                }
+              `;
+
+              const projectResult = await github.graphql(projectQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const project = projectResult.organization.projectV2;
+
+              const addMutation = `
+                mutation($projectId: ID!, $contentId: ID!) {
+                  addProjectV2ItemById(input: {
+                    projectId: $projectId
+                    contentId: $contentId
+                  }) {
+                    item {
+                      id
+                    }
+                  }
+                }
+              `;
+
+              await github.graphql(addMutation, {
+                projectId: project.id,
+                contentId: issue.node_id
+              });
+
+              console.log(`Issue #${issue.number} added to project`);
+            } catch (error) {
+              console.error('Error:', error.message);
+            }
+
       - name: Mover PR y issues vinculados
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
@@ -181,13 +232,25 @@ jobs:
               console.log(`Found linked issues: ${Array.from(issueNumbers).join(', ')}`);
               
               for (const issueNum of issueNumbers) {
-                const issueItem = itemResult.organization.projectV2.items.nodes.find(
+                let issueItem = itemResult.organization.projectV2.items.nodes.find(
                   node => node.content?.number === issueNum
                 );
                 
                 if (!issueItem) {
-                  console.log(`Issue #${issueNum} not in project`);
-                  continue;
+                  console.log(`Issue #${issueNum} not in project, adding...`);
+                  
+                  const issueData = await github.rest.issues.get({
+                    owner: org,
+                    repo: repo,
+                    issue_number: issueNum
+                  });
+                  
+                  const addResult = await github.graphql(addMutation, {
+                    projectId: project.id,
+                    contentId: issueData.data.node_id
+                  });
+                  
+                  issueItem = addResult.addProjectV2ItemById.item;
                 }
                 
                 await github.graphql(updateMutation, {
@@ -268,32 +331,13 @@ jobs:
                 projectNumber: PROJECT_NUMBER
               });
 
-              let item = itemResult.organization.projectV2.items.nodes.find(
+              const item = itemResult.organization.projectV2.items.nodes.find(
                 node => node.content?.number === issue.number
               );
 
               if (!item) {
-                console.log(`Issue #${issue.number} not in project, adding...`);
-                
-                const addMutation = `
-                  mutation($projectId: ID!, $contentId: ID!) {
-                    addProjectV2ItemById(input: {
-                      projectId: $projectId
-                      contentId: $contentId
-                    }) {
-                      item {
-                        id
-                      }
-                    }
-                  }
-                `;
-
-                const addResult = await github.graphql(addMutation, {
-                  projectId: project.id,
-                  contentId: issue.node_id
-                });
-
-                item = addResult.addProjectV2ItemById.item;
+                console.log(`Issue #${issue.number} not in project`);
+                return;
               }
 
               const updateMutation = `
@@ -391,65 +435,13 @@ jobs:
                 projectNumber: PROJECT_NUMBER
               });
 
-              let item = itemResult.organization.projectV2.items.nodes.find(
+              const item = itemResult.organization.projectV2.items.nodes.find(
                 node => node.content?.number === issue.number
               );
 
               if (!item) {
-                console.log(`Issue #${issue.number} not in project, adding...`);
-                
-                const addMutation = `
-                  mutation($projectId: ID!, $contentId: ID!) {
-                    addProjectV2ItemById(input: {
-                      projectId: $projectId
-                      contentId: $contentId
-                    }) {
-                      item {
-                        id
-                      }
-                    }
-                  }
-                `;
-
-                const addResult = await github.graphql(addMutation, {
-                  projectId: project.id,
-                  contentId: issue.node_id
-                });
-
-                item = addResult.addProjectV2ItemById.item;
-                
-                const refetchQuery = `
-                  query($org: String!, $projectNumber: Int!) {
-                    organization(login: $org) {
-                      projectV2(number: $projectNumber) {
-                        items(first: 100) {
-                          nodes {
-                            id
-                            content {
-                              ... on Issue {
-                                number
-                              }
-                            }
-                            fieldValueByName(name: "Blocked time") {
-                              ... on ProjectV2ItemFieldTextValue {
-                                text
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                `;
-
-                const refetchResult = await github.graphql(refetchQuery, {
-                  org,
-                  projectNumber: PROJECT_NUMBER
-                });
-
-                item = refetchResult.organization.projectV2.items.nodes.find(
-                  node => node.content?.number === issue.number
-                );
+                console.log(`Issue #${issue.number} not in project`);
+                return;
               }
 
               let current = item.fieldValueByName?.text || '';
