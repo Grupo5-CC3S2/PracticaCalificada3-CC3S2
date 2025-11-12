@@ -1,0 +1,54 @@
+name: Lint, Test and Coverage
+
+on:
+  push:        # Se ejecuta en cada push, en cualquier rama
+    branches: ["**"]
+
+permissions:
+  contents: read # El workflow solo puede leer el contenido del repositorio
+
+jobs:
+  lint-test-cov:
+    name: Lint + Tests + Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Construir python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias # Instalar black, pytest, gitleaks
+        run: |
+          make install-deps
+          echo "VIRTUAL_ENV=$(pwd)/.venv" >> $GITHUB_ENV
+          echo "$(pwd)/.venv/bin" >> $GITHUB_PATH
+
+      - name: Linting (Black)
+        run: |
+          make format-check || (echo "Error: formato incorrecto" && exit 1)
+
+      - name: Ejecutar pytest con coverage
+        run: |
+          make test
+
+      - name: Generar artefacto XML de cobertura
+        run: |
+          make cov-xml-report
+          coverage report -m || true
+
+      - name: Subir artefacto de cobertura
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+      - name: Finalizacion
+        if: success()
+        run: |
+          echo "Lint, tests y cobertura completados correctamente."
+          echo "Resultados disponibles como artifact: coverage-report"

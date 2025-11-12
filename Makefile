@@ -1,14 +1,21 @@
 .PHONY: install-deps install-hooks setup test
 
-install-deps:
-	@echo "Instalando black (Python formatter)..."
-	pip install --user black || pip install black
+SHELL := /bin/bash
 
-	@echo "Descargando gitleaks v8.18.4 para Windows"
-	curl -L -o gitleaks.exe \
-		https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_windows_x64.exe
-	chmod +x gitleaks.exe
-	@echo "gitleaks instalado como './gitleaks.exe'"
+install-deps:
+	python -m pip install --upgrade pip &&\
+	python -m venv .venv && \
+	echo "Instalando dependencias de python (black, pytest, pytest-cov)..." && \
+	source .venv/bin/activate && \
+	pip install -r requirements.txt
+	@echo "Descargando gitleaks v8.18.4 para Linux"
+	curl -L -o gitleaks_8.18.4_linux_x64.tar.gz \
+		https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz
+	tar -xzf gitleaks_8.18.4_linux_x64.tar.gz
+	rm gitleaks_8.18.4_linux_x64.tar.gz
+	chmod +x gitleaks
+	@echo "gitleaks instalado como './gitleaks'"
+	@sudo mv gitleaks /usr/local/bin/
 
 install-hooks:
 	@echo "Instalando hooks..."
@@ -23,8 +30,16 @@ setup: install-deps install-hooks
 	@echo "Setup completo. ya puede usar git commit"
 
 test:
-	@echo "Ejecutando tests..."
+	@echo "Ejecutando tests con cobertura..."
 	pytest
+
+cov-xml-report:
+	@echo "Generando reporte XML de cobertura..."
+	pytest --cov-report=xml
+
+cov-html-report:
+	@echo "Generando reporte HTML de cobertura..."
+	pytest --cov-report=html
 
 format:
 	@echo "Formateando código python con black..."
