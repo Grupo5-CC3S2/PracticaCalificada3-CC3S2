@@ -2,14 +2,14 @@ name: Project Automation
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, closed, labeled]
+    types: [opened, synchronize, reopened, labeled, closed]
   issues:
     types: [labeled, unlabeled]
 
 permissions:
-  pull-requests: write
-  issues: write
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   project-automation:
@@ -22,30 +22,31 @@ jobs:
           script: |
             const action = context.payload.action;
             const pr = context.payload.pull_request;
-            let targetColumn = null;
+            let targetStatus = null;
 
             if (['opened', 'synchronize', 'reopened'].includes(action)) {
-              targetColumn = 'In Progress';
+              targetStatus = 'In Progress';
+            } else if (action === 'labeled' && context.payload.label?.name === 'ready-for-review') {
+              targetStatus = 'Review/QA';
+            } else if (action === 'closed' && pr.merged) {
+              targetStatus = 'Done';
             }
 
-            if (action === 'labeled' && context.payload.label.name === 'ready-for-review') {
-              targetColumn = 'Review/QA';
-            }
+            if (!targetStatus) return;
 
-            if (action === 'closed' && pr.merged) {
-              targetColumn = 'Done';
-            }
+            const projectId = 2; // TU PROJECT ID
+            const org = context.repo.owner;
 
-            if (targetColumn) {
-              const projectId = 1; // CAMBIA A TU PROJECT ID
-              const card = await github.graphql(`
-                query($owner: String!, $repo: String!, $pr: Int!) {
-                  repository(owner: $owner, name: $repo) {
-                    pullRequest(number: $pr) {
-                      projectCards {
-                        nodes {
-                          id
-                          column {
+            // Obtener el item del PR en el proyecto
+            const query = `
+              query($org: String!, $pr: Int!) {
+                organization(login: $org) {
+                  projectV2(number: $projectId) {
+                    items(first: 100, filterBy: {content: {type: PULL_REQUEST, number: $pr}}) {
+                      nodes {
+                        id
+                        fieldValueByName(name: "Status") {
+                          ... on ProjectV2ItemFieldSingleSelectValue {
                             name
                           }
                         }
@@ -53,23 +54,53 @@ jobs:
                     }
                   }
                 }
-              `, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pr: pr.number
-              });
+              }
+            `;
 
-              const cardId = card.repository.pullRequest.projectCards.nodes[0]?.id;
-              if (!cardId) return;
+            const variables = { org, pr: pr.number };
+            const result = await github.graphql(query, variables);
+            const item = result.organization.projectV2.items.nodes[0];
+            if (!item) return;
 
-              await github.graphql(`
-                mutation($cardId: ID!, $columnName: String!) {
-                  moveProjectCard(input: {cardId: $cardId, columnName: $columnName}) {
-                    clientMutationId
+            // Obtener opción de estado
+            const statusField = await github.graphql(`
+              query($org: String!) {
+                organization(login: $org) {
+                  projectV2(number: $projectId) {
+                    field(name: "Status") {
+                      ... on ProjectV2SingleSelectField {
+                        options {
+                          id
+                          name
+                        }
+                      }
+                    }
                   }
                 }
-              `, { cardId, columnName: targetColumn });
-            }
+              }
+            `, { org });
+
+            const optionId = statusField.organization.projectV2.field.options.find(o => o.name === targetStatus)?.id;
+            if (!optionId) return;
+
+            // Actualizar estado
+            await github.graphql(`
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId
+                  itemId: $itemId
+                  fieldId: $fieldId
+                  value: { singleSelectOptionId: $optionId }
+                }) {
+                  clientMutationId
+                }
+              }
+            `, {
+              projectId: `PVT_${projectId}`,
+              itemId: item.id,
+              fieldId: statusField.organization.projectV2.field.id,
+              optionId
+            });
 
       - name: Actualizar Estimate por label size
         if: github.event_name == 'issues' && github.event.action == 'labeled' && startsWith(github.event.label.name, 'size:')
@@ -81,11 +112,48 @@ jobs:
             const value = sizeMap[label];
             if (!value) return;
 
-            const projectId = 1; // CAMBIA A TU PROJECT ID
-            const fieldId = 'Estimate'; // CAMBIA SI ES DIFERENTE
+            const projectId = 2;
+            const org = context.repo.owner;
+            const issueId = context.payload.issue.node_id;
 
+            // Obtener campo Estimate
+            const fieldQuery = await github.graphql(`
+              query($org: String!) {
+                organization(login: $org) {
+                  projectV2(number: $projectId) {
+                    field(name: "Estimate") {
+                      ... on ProjectV2ItemFieldNumberValue {
+                        id
+                      }
+                    }
+                  }
+                }
+              }
+            `, { org });
+
+            const fieldId = fieldQuery.organization.projectV2.field.id;
+
+            // Obtener item del issue
+            const itemQuery = await github.graphql(`
+              query($org: String!, $issueId: ID!) {
+                node(id: $issueId) {
+                  ... on Issue {
+                    projectItems(first: 10) {
+                      nodes {
+                        id
+                      }
+                    }
+                  }
+                }
+              }
+            `, { issueId });
+
+            const itemId = itemQuery.node.projectItems.nodes[0]?.id;
+            if (!itemId) return;
+
+            // Actualizar
             await github.graphql(`
-              mutation($projectId: ID!, $itemId: ID!, $fieldId: String!, $value: Int!) {
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: Float!) {
                 updateProjectV2ItemFieldValue(input: {
                   projectId: $projectId
                   itemId: $itemId
@@ -96,8 +164,8 @@ jobs:
                 }
               }
             `, {
-              projectId,
-              itemId: context.payload.issue.node_id,
+              projectId: `PVT_${projectId}`,
+              itemId,
               fieldId,
               value
             });
@@ -107,39 +175,60 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const action = context.payload.action;
             const label = context.payload.label?.name;
             if (!label || !['status:blocked', 'status:non-blocked'].includes(label)) return;
 
             const now = new Date().toISOString().split('T')[0];
-            const projectId = 1; // CAMBIA A TU PROJECT ID
-            const fieldId = 'Blocked time';
+            const projectId = 2;
+            const org = context.repo.owner;
+            const issueId = context.payload.issue.node_id;
 
-            let current = '';
-            try {
-              const field = await github.graphql(`
-                query($projectId: ID!, $itemId: ID!, $fieldId: String!) {
-                  node(id: $itemId) {
-                    ... on ProjectV2Item {
-                      fieldValueByName(name: $fieldId) {
-                        ... on ProjectV2ItemFieldTextValue { text }
+            // Obtener campo Blocked time
+            const fieldQuery = await github.graphql(`
+              query($org: String!) {
+                organization(login: $org) {
+                  projectV2(number: $projectId) {
+                    field(name: "Blocked time") {
+                      ... on ProjectV2ItemFieldTextValue {
+                        id
                       }
                     }
                   }
                 }
-              `, { projectId, itemId: context.payload.issue.node_id, fieldId });
-              current = field.node.fieldValueByName?.text || '';
-            } catch (e) {}
+              }
+            `, { org });
 
-            let newValue = current;
-            if (label === 'status:blocked') {
-              newValue = current ? `${current}, ${now} (start)` : `${now} (start)`;
-            } else {
-              newValue = current ? `${current}, ${now} (end)` : `${now} (end)`;
-            }
+            const fieldId = fieldQuery.organization.projectV2.field.id;
+
+            // Obtener item
+            const itemQuery = await github.graphql(`
+              query($issueId: ID!) {
+                node(id: $issueId) {
+                  ... on Issue {
+                    projectItems(first: 10) {
+                      nodes {
+                        id
+                        fieldValueByName(name: "Blocked time") {
+                          ... on ProjectV2ItemFieldTextValue {
+                            text
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `, { issueId });
+
+            const item = itemQuery.node.projectItems.nodes[0];
+            if (!item) return;
+
+            let current = item.fieldValueByName?.text || '';
+            const suffix = label === 'status:blocked' ? ' - START' : ' - END';
+            const newValue = current ? `${current}\n${now}${suffix}` : `${now}${suffix}`;
 
             await github.graphql(`
-              mutation($projectId: ID!, $itemId: ID!, $fieldId: String!, $value: String!) {
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
                 updateProjectV2ItemFieldValue(input: {
                   projectId: $projectId
                   itemId: $itemId
@@ -149,4 +238,9 @@ jobs:
                   clientMutationId
                 }
               }
-            `, { projectId, itemId: context.payload.issue.node_id, fieldId, value: newValue });
+            `, {
+              projectId: `PVT_${projectId}`,
+              itemId: item.id,
+              fieldId,
+              value: newValue
+            };
