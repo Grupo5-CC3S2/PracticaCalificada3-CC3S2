@@ -1,4 +1,4 @@
-## Registrar deuda técnica y lecciones aprendidas #13
+## Registrar deuda técnica y lecciones aprendidas
 
 ### Deuda técnica
 
