@@ -1,0 +1,533 @@
+name: Project Automation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, closed]
+  issues:
+    types: [opened, edited, deleted, transferred, pinned, unpinned, closed, reopened, assigned, unassigned, labeled, unlabeled, locked, unlocked, milestoned, demilestoned]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+  
+
+jobs:
+  project-automation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto-agregar issue al proyecto
+        if: github.event_name == 'issues' && github.event.action == 'opened'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const PROJECT_NUMBER = 2;
+            const org = context.repo.owner;
+            const issue = context.payload.issue;
+
+            try {
+              const projectQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      id
+                    }
+                  }
+                }
+              `;
+
+              const projectResult = await github.graphql(projectQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const project = projectResult.organization.projectV2;
+
+              const addMutation = `
+                mutation($projectId: ID!, $contentId: ID!) {
+                  addProjectV2ItemById(input: {
+                    projectId: $projectId
+                    contentId: $contentId
+                  }) {
+                    item {
+                      id
+                    }
+                  }
+                }
+              `;
+
+              await github.graphql(addMutation, {
+                projectId: project.id,
+                contentId: issue.node_id
+              });
+
+              console.log(`Issue #${issue.number} added to project`);
+            } catch (error) {
+              console.error('Error:', error.message);
+            }
+
+      - name: Mover PR y issues vinculados
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const action = context.payload.action;
+            const pr = context.payload.pull_request;
+            
+            const PROJECT_NUMBER = 2;
+            const org = context.repo.owner;
+            const repo = context.repo.repo;
+            
+            try {
+              const projectQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      id
+                      field(name: "Status") {
+                        ... on ProjectV2SingleSelectField {
+                          id
+                          options {
+                            id
+                            name
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+              
+              const projectResult = await github.graphql(projectQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+              
+              const project = projectResult.organization.projectV2;
+              const statusField = project.field;
+              
+              const itemQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      items(first: 100) {
+                        nodes {
+                          id
+                          content {
+                            ... on PullRequest {
+                              number
+                            }
+                            ... on Issue {
+                              number
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+              
+              const itemResult = await github.graphql(itemQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+              
+              const updateMutation = `
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { singleSelectOptionId: $optionId }
+                  }) {
+                    projectV2Item {
+                      id
+                    }
+                  }
+                }
+              `;
+              
+              const addMutation = `
+                mutation($projectId: ID!, $contentId: ID!) {
+                  addProjectV2ItemById(input: {
+                    projectId: $projectId
+                    contentId: $contentId
+                  }) {
+                    item {
+                      id
+                    }
+                  }
+                }
+              `;
+              
+              if (['opened', 'synchronize', 'reopened'].includes(action)) {
+                const targetStatus = 'In progress';
+                const optionId = statusField.options.find(o => o.name === targetStatus)?.id;
+                
+                if (!optionId) {
+                  console.log(`Status "${targetStatus}" not found`);
+                  return;
+                }
+                
+                let prItem = itemResult.organization.projectV2.items.nodes.find(
+                  node => node.content?.number === pr.number
+                );
+                
+                if (!prItem) {
+                  console.log(`PR #${pr.number} not in project, adding...`);
+                  const addResult = await github.graphql(addMutation, {
+                    projectId: project.id,
+                    contentId: pr.node_id
+                  });
+                  prItem = addResult.addProjectV2ItemById.item;
+                }
+                
+                await github.graphql(updateMutation, {
+                  projectId: project.id,
+                  itemId: prItem.id,
+                  fieldId: statusField.id,
+                  optionId
+                });
+                
+                console.log(`PR #${pr.number} moved to "${targetStatus}"`);
+                return;
+              }
+              
+              if (action === 'labeled' && context.payload.label?.name === 'ready-for-review') {
+                const targetStatus = 'Review-Q/A';
+                const optionId = statusField.options.find(o => o.name === targetStatus)?.id;
+                
+                if (!optionId) {
+                  console.log(`Status "${targetStatus}" not found`);
+                  return;
+                }
+                
+                const issueNumbers = new Set();
+                const prText = `${pr.title} ${pr.body || ''}`;
+                const prMatches = prText.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
+                for (const match of prMatches) {
+                  const num = parseInt(match[1] || match[2]);
+                  if (num) issueNumbers.add(num);
+                }
+                
+                const commits = await github.rest.pulls.listCommits({
+                  owner: org,
+                  repo: repo,
+                  pull_number: pr.number
+                });
+                
+                for (const commit of commits.data) {
+                  const message = commit.commit.message;
+                  const commitMatches = message.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
+                  for (const match of commitMatches) {
+                    const num = parseInt(match[1] || match[2]);
+                    if (num) issueNumbers.add(num);
+                  }
+                }
+                
+                if (issueNumbers.size === 0) {
+                  console.log('No linked issues found');
+                  return;
+                }
+                
+                console.log(`Found linked issues: ${Array.from(issueNumbers).join(', ')}`);
+                
+                for (const issueNum of issueNumbers) {
+                  const issueItem = itemResult.organization.projectV2.items.nodes.find(
+                    node => node.content?.number === issueNum
+                  );
+                  
+                  if (!issueItem) {
+                    console.log(`Issue #${issueNum} not in project, skipping`);
+                    continue;
+                  }
+                  
+                  await github.graphql(updateMutation, {
+                    projectId: project.id,
+                    itemId: issueItem.id,
+                    fieldId: statusField.id,
+                    optionId
+                  });
+                  
+                  console.log(`Issue #${issueNum} moved to "${targetStatus}"`);
+                }
+                return;
+              }
+              
+              if (action === 'closed' && pr.merged) {
+                const targetStatus = 'Done';
+                const optionId = statusField.options.find(o => o.name === targetStatus)?.id;
+                
+                if (!optionId) {
+                  console.log(`Status "${targetStatus}" not found`);
+                  return;
+                }
+                
+                const issueNumbers = new Set();
+                const prText = `${pr.title} ${pr.body || ''}`;
+                const prMatches = prText.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
+                for (const match of prMatches) {
+                  const num = parseInt(match[1] || match[2]);
+                  if (num) issueNumbers.add(num);
+                }
+                
+                const commits = await github.rest.pulls.listCommits({
+                  owner: org,
+                  repo: repo,
+                  pull_number: pr.number
+                });
+                
+                for (const commit of commits.data) {
+                  const message = commit.commit.message;
+                  const commitMatches = message.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
+                  for (const match of commitMatches) {
+                    const num = parseInt(match[1] || match[2]);
+                    if (num) issueNumbers.add(num);
+                  }
+                }
+                
+                if (issueNumbers.size === 0) {
+                  console.log('No linked issues found');
+                  return;
+                }
+                
+                console.log(`Found linked issues: ${Array.from(issueNumbers).join(', ')}`);
+                
+                for (const issueNum of issueNumbers) {
+                  const issueItem = itemResult.organization.projectV2.items.nodes.find(
+                    node => node.content?.number === issueNum
+                  );
+                  
+                  if (!issueItem) {
+                    console.log(`Issue #${issueNum} not in project, skipping`);
+                    continue;
+                  }
+                  
+                  await github.graphql(updateMutation, {
+                    projectId: project.id,
+                    itemId: issueItem.id,
+                    fieldId: statusField.id,
+                    optionId
+                  });
+                  
+                  console.log(`Issue #${issueNum} moved to "${targetStatus}"`);
+                }
+                return;
+              }
+              
+            } catch (error) {
+              console.error('Error:', error.message);
+              throw error;
+            }
+
+      - name: Actualizar Estimate por label size
+        if: github.event_name == 'issues' && github.event.action == 'labeled' && startsWith(github.event.label.name, 'size:')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const label = context.payload.label.name;
+            const sizeMap = { 'size:S': 1, 'size:M': 3, 'size:L': 5 };
+            const value = sizeMap[label];
+            if (!value) return;
+
+            const PROJECT_NUMBER = 2;
+            const org = context.repo.owner;
+            const issue = context.payload.issue;
+
+            try {
+              const projectQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      id
+                      field(name: "Estimate") {
+                        ... on ProjectV2FieldCommon {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+
+              const projectResult = await github.graphql(projectQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const project = projectResult.organization.projectV2;
+              const estimateField = project.field;
+
+              const itemQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      items(first: 100) {
+                        nodes {
+                          id
+                          content {
+                            ... on Issue {
+                              number
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+
+              const itemResult = await github.graphql(itemQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const item = itemResult.organization.projectV2.items.nodes.find(
+                node => node.content?.number === issue.number
+              );
+
+              if (!item) {
+                console.log(`Issue #${issue.number} not in project`);
+                return;
+              }
+
+              const updateMutation = `
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: Float!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { number: $value }
+                  }) {
+                    projectV2Item {
+                      id
+                    }
+                  }
+                }
+              `;
+
+              await github.graphql(updateMutation, {
+                projectId: project.id,
+                itemId: item.id,
+                fieldId: estimateField.id,
+                value
+              });
+
+              console.log(`Issue #${issue.number} Estimate updated to ${value}`);
+            } catch (error) {
+              console.error('Error:', error.message);
+              throw error;
+            }
+
+      - name: Registrar Blocked time
+        if: github.event_name == 'issues' && (github.event.action == 'labeled' || github.event.action == 'unlabeled')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const label = context.payload.label?.name;
+            if (!label || !['status:blocked', 'status:non-blocked'].includes(label)) return;
+
+            const now = new Date().toISOString().split('T')[0];
+            const PROJECT_NUMBER = 2;
+            const org = context.repo.owner;
+            const issue = context.payload.issue;
+
+            try {
+              const projectQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      id
+                      field(name: "Blocked time") {
+                        ... on ProjectV2FieldCommon {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+
+              const projectResult = await github.graphql(projectQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const project = projectResult.organization.projectV2;
+              const blockedField = project.field;
+
+              const itemQuery = `
+                query($org: String!, $projectNumber: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $projectNumber) {
+                      items(first: 100) {
+                        nodes {
+                          id
+                          content {
+                            ... on Issue {
+                              number
+                            }
+                          }
+                          fieldValueByName(name: "Blocked time") {
+                            ... on ProjectV2ItemFieldTextValue {
+                              text
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+
+              const itemResult = await github.graphql(itemQuery, {
+                org,
+                projectNumber: PROJECT_NUMBER
+              });
+
+              const item = itemResult.organization.projectV2.items.nodes.find(
+                node => node.content?.number === issue.number
+              );
+
+              if (!item) {
+                console.log(`Issue #${issue.number} not in project`);
+                return;
+              }
+
+              let current = item.fieldValueByName?.text || '';
+              const suffix = label === 'status:blocked' ? ' - START' : ' - END';
+              const newValue = current ? `${current}\n${now}${suffix}` : `${now}${suffix}`;
+
+              const updateMutation = `
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { text: $value }
+                  }) {
+                    projectV2Item {
+                      id
+                    }
+                  }
+                }
+              `;
+
+              await github.graphql(updateMutation, {
+                projectId: project.id,
+                itemId: item.id,
+                fieldId: blockedField.id,
+                value: newValue
+              });
+
+              console.log(`Issue #${issue.number} Blocked time updated`);
+            } catch (error) {
+              console.error('Error:', error.message);
+              throw error;
+            }
