@@ -74,17 +74,6 @@ jobs:
           script: |
             const action = context.payload.action;
             const pr = context.payload.pull_request;
-            let targetStatus = null;
-            
-            if (['opened', 'synchronize', 'reopened'].includes(action)) {
-              targetStatus = 'In progress';
-            } else if (action === 'labeled' && context.payload.label?.name === 'ready-for-review') {
-              targetStatus = 'Review-Q/A';
-            } else if (action === 'closed' && pr.merged) {
-              targetStatus = 'Done';
-            }
-            
-            if (!targetStatus) return;
             
             const PROJECT_NUMBER = 2;
             const org = context.repo.owner;
@@ -117,12 +106,6 @@ jobs:
               
               const project = projectResult.organization.projectV2;
               const statusField = project.field;
-              
-              const optionId = statusField.options.find(o => o.name === targetStatus)?.id;
-              if (!optionId) {
-                console.log(`Status "${targetStatus}" not found in project`);
-                return;
-              }
               
               const itemQuery = `
                 query($org: String!, $projectNumber: Int!) {
@@ -179,88 +162,159 @@ jobs:
                 }
               `;
               
-              let prItem = itemResult.organization.projectV2.items.nodes.find(
-                node => node.content?.number === pr.number
-              );
-              
-              if (!prItem) {
-                console.log(`PR #${pr.number} not in project, adding...`);
-                const addResult = await github.graphql(addMutation, {
-                  projectId: project.id,
-                  contentId: pr.node_id
-                });
-                prItem = addResult.addProjectV2ItemById.item;
-              }
-              
-              await github.graphql(updateMutation, {
-                projectId: project.id,
-                itemId: prItem.id,
-                fieldId: statusField.id,
-                optionId
-              });
-              
-              console.log(`PR #${pr.number} moved to "${targetStatus}"`);
-              
-              const issueNumbers = new Set();
-              const prText = `${pr.title} ${pr.body || ''}`;
-              const prMatches = prText.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
-              for (const match of prMatches) {
-                const num = parseInt(match[1] || match[2]);
-                if (num) issueNumbers.add(num);
-              }
-              
-              const commits = await github.rest.pulls.listCommits({
-                owner: org,
-                repo: repo,
-                pull_number: pr.number
-              });
-              
-              for (const commit of commits.data) {
-                const message = commit.commit.message;
-                const commitMatches = message.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
-                for (const match of commitMatches) {
-                  const num = parseInt(match[1] || match[2]);
-                  if (num) issueNumbers.add(num);
+              if (['opened', 'synchronize', 'reopened'].includes(action)) {
+                const targetStatus = 'In progress';
+                const optionId = statusField.options.find(o => o.name === targetStatus)?.id;
+                
+                if (!optionId) {
+                  console.log(`Status "${targetStatus}" not found`);
+                  return;
                 }
-              }
-              
-              if (issueNumbers.size === 0) {
-                console.log('No linked issues found');
-                return;
-              }
-              
-              console.log(`Found linked issues: ${Array.from(issueNumbers).join(', ')}`);
-              
-              for (const issueNum of issueNumbers) {
-                let issueItem = itemResult.organization.projectV2.items.nodes.find(
-                  node => node.content?.number === issueNum
+                
+                let prItem = itemResult.organization.projectV2.items.nodes.find(
+                  node => node.content?.number === pr.number
                 );
                 
-                if (!issueItem) {
-                  console.log(`Issue #${issueNum} not in project, adding...`);
-                  
-                  const issueData = await github.rest.issues.get({
-                    owner: org,
-                    repo: repo,
-                    issue_number: issueNum
-                  });
-                  
+                if (!prItem) {
+                  console.log(`PR #${pr.number} not in project, adding...`);
                   const addResult = await github.graphql(addMutation, {
                     projectId: project.id,
-                    contentId: issueData.data.node_id
+                    contentId: pr.node_id
                   });
-                  
-                  issueItem = addResult.addProjectV2ItemById.item;
+                  prItem = addResult.addProjectV2ItemById.item;
                 }
                 
                 await github.graphql(updateMutation, {
                   projectId: project.id,
-                  itemId: issueItem.id,
+                  itemId: prItem.id,
                   fieldId: statusField.id,
                   optionId
                 });
                 
-                console.log(`Issue #${issueNum} moved to "${targetStatus}"`);
+                console.log(`PR #${pr.number} moved to "${targetStatus}"`);
+                return;
+              }
+              
+              if (action === 'labeled' && context.payload.label?.name === 'ready-for-review') {
+                const targetStatus = 'Review-Q/A';
+                const optionId = statusField.options.find(o => o.name === targetStatus)?.id;
+                
+                if (!optionId) {
+                  console.log(`Status "${targetStatus}" not found`);
+                  return;
+                }
+                
+                const issueNumbers = new Set();
+                const prText = `${pr.title} ${pr.body || ''}`;
+                const prMatches = prText.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
+                for (const match of prMatches) {
+                  const num = parseInt(match[1] || match[2]);
+                  if (num) issueNumbers.add(num);
+                }
+                
+                const commits = await github.rest.pulls.listCommits({
+                  owner: org,
+                  repo: repo,
+                  pull_number: pr.number
+                });
+                
+                for (const commit of commits.data) {
+                  const message = commit.commit.message;
+                  const commitMatches = message.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
+                  for (const match of commitMatches) {
+                    const num = parseInt(match[1] || match[2]);
+                    if (num) issueNumbers.add(num);
+                  }
+                }
+                
+                if (issueNumbers.size === 0) {
+                  console.log('No linked issues found');
+                  return;
+                }
+                
+                console.log(`Found linked issues: ${Array.from(issueNumbers).join(', ')}`);
+                
+                for (const issueNum of issueNumbers) {
+                  const issueItem = itemResult.organization.projectV2.items.nodes.find(
+                    node => node.content?.number === issueNum
+                  );
+                  
+                  if (!issueItem) {
+                    console.log(`Issue #${issueNum} not in project, skipping`);
+                    continue;
+                  }
+                  
+                  await github.graphql(updateMutation, {
+                    projectId: project.id,
+                    itemId: issueItem.id,
+                    fieldId: statusField.id,
+                    optionId
+                  });
+                  
+                  console.log(`Issue #${issueNum} moved to "${targetStatus}"`);
+                }
+                return;
+              }
+              
+              if (action === 'closed' && pr.merged) {
+                const targetStatus = 'Done';
+                const optionId = statusField.options.find(o => o.name === targetStatus)?.id;
+                
+                if (!optionId) {
+                  console.log(`Status "${targetStatus}" not found`);
+                  return;
+                }
+                
+                const issueNumbers = new Set();
+                const prText = `${pr.title} ${pr.body || ''}`;
+                const prMatches = prText.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
+                for (const match of prMatches) {
+                  const num = parseInt(match[1] || match[2]);
+                  if (num) issueNumbers.add(num);
+                }
+                
+                const commits = await github.rest.pulls.listCommits({
+                  owner: org,
+                  repo: repo,
+                  pull_number: pr.number
+                });
+                
+                for (const commit of commits.data) {
+                  const message = commit.commit.message;
+                  const commitMatches = message.matchAll(/#(\d+)|(?:close[sd]?|fix(?:e[sd]?)?|resolve[sd]?)\s+#(\d+)/gi);
+                  for (const match of commitMatches) {
+                    const num = parseInt(match[1] || match[2]);
+                    if (num) issueNumbers.add(num);
+                  }
+                }
+                
+                if (issueNumbers.size === 0) {
+                  console.log('No linked issues found');
+                  return;
+                }
+                
+                console.log(`Found linked issues: ${Array.from(issueNumbers).join(', ')}`);
+                
+                for (const issueNum of issueNumbers) {
+                  const issueItem = itemResult.organization.projectV2.items.nodes.find(
+                    node => node.content?.number === issueNum
+                  );
+                  
+                  if (!issueItem) {
+                    console.log(`Issue #${issueNum} not in project, skipping`);
+                    continue;
+                  }
+                  
+                  await github.graphql(updateMutation, {
+                    projectId: project.id,
+                    itemId: issueItem.id,
+                    fieldId: statusField.id,
+                    optionId
+                  });
+                  
+                  console.log(`Issue #${issueNum} moved to "${targetStatus}"`);
+                }
+                return;
               }
               
             } catch (error) {
