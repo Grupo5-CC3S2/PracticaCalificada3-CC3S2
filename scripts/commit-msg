@@ -1,0 +1,14 @@
+#!/bin/bash
+# commit-msg: valida Conventional Commits. BLOQUEA si no cumple
+MSG_FILE=$1
+MSG=$(cat "$MSG_FILE")
+REGEX="^(feat|fix|docs|test|refactor|chore)(\([a-z-]+\))?: .+"
+if [[ ! $MSG =~ $REGEX ]]; then
+    echo "ERROR: Commit no sigue Conventional Commits"
+    echo "Formato: tipo(ámbito): descripción"
+    echo "Ej: feat(setup): add hooks"
+    exit 1
+else
+    echo "Mensaje de commit correcto. Procediendo con el commit..."
+    exit 0
+fi

@@ -1,0 +1,8 @@
+text.txt
+
+# Entorno 
+.venv/
+
+# Cache de pytest
+__pycache__/
+.pytest_cache

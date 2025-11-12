@@ -1,0 +1,22 @@
+#!/bin/bash
+if command -v black &> /dev/null; then
+    black --check . || {
+        echo "black: formato incorrecto"
+        exit 1
+    }
+fi
+if command -v gitleaks &> /dev/null; then
+    gitleaks protect --staged --source . --verbose || {
+        echo "gitleaks: posibles secretos"
+        exit 1
+    }
+else
+    echo "gitleaks no encontrado"
+fi
+large_files=$(find . -type f -size +10M)
+if [ -n "$large_files" ]; then
+    echo "Archivos >10MB: $large_files"
+    exit 1
+fi
+echo "El contenido del commit es válido."
+exit 0
