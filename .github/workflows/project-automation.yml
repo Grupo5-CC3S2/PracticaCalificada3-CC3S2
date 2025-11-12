@@ -26,7 +26,7 @@ jobs:
             let targetStatus = null;
             
             if (['opened', 'synchronize', 'reopened'].includes(action)) {
-              targetStatus = 'In Progress';
+              targetStatus = 'In progress';
             } else if (action === 'labeled' && context.payload.label?.name === 'ready-for-review') {
               targetStatus = 'Review/QA';
             } else if (action === 'closed' && pr.merged) {
