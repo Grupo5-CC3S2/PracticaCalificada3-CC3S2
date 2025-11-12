@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, closed]
   issues:
-    types: [opened, labeled, unlabeled]
+    types: [opened, edited, deleted, transferred, pinned, unpinned, closed, reopened, assigned, unassigned, labeled, unlabeled, locked, unlocked, milestoned, demilestoned]
 
 permissions:
   contents: read
